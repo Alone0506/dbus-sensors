@@ -20,9 +20,11 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -55,7 +57,7 @@
 // https://gerrit.openbmc-project.xyz/c/openbmc/docs/+/41452
 // https://github.com/openbmc/docs/tree/master/designs/
 
-static const char* sensorType = "ExternalSensor";
+static constexpr std::string_view sensorType = "ExternalSensor";
 
 void updateReaper(
     boost::container::flat_map<std::string, std::shared_ptr<ExternalSensor>>&
@@ -179,7 +181,7 @@ void createSensors(
                 const SensorBaseConfigMap& baseConfigMap =
                     baseConfiguration.second;
 
-                // MinValue and MinValue are mandatory numeric parameters
+                // MinValue and MaxValue are mandatory numeric parameters
                 auto minFound = baseConfigMap.find("MinValue");
                 if (minFound == baseConfigMap.end())
                 {
@@ -303,23 +305,32 @@ void createSensors(
 
                 auto& sensorEntry = sensors[sensorName];
                 sensorEntry = nullptr;
+                try
+                {
+                    sensorEntry = std::make_shared<ExternalSensor>(
+                        sensorType, objectServer, dbusConnection, sensorName,
+                        sensorUnits, std::move(sensorThresholds), interfacePath,
+                        maxValue, minValue, timeoutSecs, readState);
+                    sensorEntry->initWriteHook(
+                        [&sensors, &reaperTimer](
+                            const std::chrono::steady_clock::time_point& now) {
+                            updateReaper(sensors, reaperTimer, now);
+                        });
 
-                sensorEntry = std::make_shared<ExternalSensor>(
-                    sensorType, objectServer, dbusConnection, sensorName,
-                    sensorUnits, std::move(sensorThresholds), interfacePath,
-                    maxValue, minValue, timeoutSecs, readState);
-                sensorEntry->initWriteHook(
-                    [&sensors, &reaperTimer](
-                        const std::chrono::steady_clock::time_point& now) {
-                        updateReaper(sensors, reaperTimer, now);
-                    });
-
-                lg2::debug("ExternalSensor '{NAME}' created", "NAME",
-                           sensorName);
+                    lg2::debug("ExternalSensor '{NAME}' created", "NAME",
+                               sensorName);
+                }
+                catch (const std::exception& e)
+                {
+                    lg2::error(
+                        "Failed to create ExternalSensor '{NAME}': {ERROR}",
+                        "NAME", sensorName, "ERROR", e.what());
+                    continue;
+                }
             }
         });
-
-    getter->getConfiguration(std::vector<std::string>{sensorType});
+    constexpr std::array<std::string_view, 1> sensorTypes{{sensorType}};
+    getter->getConfiguration(sensorTypes);
 }
 
 int main()
@@ -348,12 +359,6 @@ int main()
     std::function<void(sdbusplus::message_t&)> eventHandler =
         [&objectServer, &sensors, &systemBus, &sensorsChanged, &filterTimer,
          &reaperTimer](sdbusplus::message_t& message) mutable {
-            if (message.is_method_error())
-            {
-                lg2::error("callback method error");
-                return;
-            }
-
             const auto* messagePath = message.get_path();
             sensorsChanged->insert(messagePath);
             lg2::debug("ExternalSensor change event received: '{PATH}'", "PATH",
@@ -380,9 +385,9 @@ int main()
                 });
         };
 
+    static constexpr std::array<std::string_view, 1> sensorTypes{{sensorType}};
     std::vector<std::unique_ptr<sdbusplus::bus::match_t>> matches =
-        setupPropertiesChangedMatches(
-            *systemBus, std::to_array<const char*>({sensorType}), eventHandler);
+        setupPropertiesChangedMatches(*systemBus, sensorTypes, eventHandler);
 
     lg2::debug("ExternalSensor service entering main loop");
 

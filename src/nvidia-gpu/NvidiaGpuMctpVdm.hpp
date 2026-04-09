@@ -12,13 +12,15 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace gpu
 {
 
-using InventoryValue = std::variant<std::string, std::vector<uint8_t>>;
+using InventoryValue =
+    std::variant<std::string, std::vector<uint8_t>, uint32_t>;
 constexpr size_t maxInventoryDataSize = 256;
 
 constexpr uint16_t nvidiaPciVendorId = 0x10de;
@@ -26,6 +28,8 @@ constexpr uint16_t nvidiaPciVendorId = 0x10de;
 enum class MessageType : uint8_t
 {
     DEVICE_CAPABILITY_DISCOVERY = 0,
+    NETWORK_PORT = 1,
+    PCIE_LINK = 2,
     PLATFORM_ENVIRONMENTAL = 3
 };
 
@@ -41,13 +45,44 @@ enum class PlatformEnvironmentalCommands : uint8_t
     GET_CURRENT_POWER_DRAW = 0x03,
     GET_MAX_OBSERVED_POWER = 0x04,
     GET_CURRENT_ENERGY_COUNTER = 0x06,
+    GET_POWER_LIMITS = 0x07,
     GET_INVENTORY_INFORMATION = 0x0C,
+    GET_DRIVER_INFORMATION = 0x0E,
     GET_VOLTAGE = 0x0F,
+};
+
+enum class NetworkPortCommands : uint8_t
+{
+    GetEthernetPortTelemetryCounters = 0x0F,
+    GetPortNetworkAddresses = 0x11,
+};
+
+enum class PcieLinkCommands : uint8_t
+{
+    QueryScalarGroupTelemetryV1 = 0x04,
+    ListPCIePorts = 0x07,
+    QueryScalarGroupTelemetryV2 = 0x24,
+};
+
+enum class PcieScalarGroupId : uint8_t
+{
+    PciIdentity = 0,
+    LinkSpeedWidth = 1,
+    AerErrorCounters = 2,
+    RecoveryCounter = 3,
+    DetailedErrorCounters = 4,
+    ThroughputCounters = 5,
+    LtssmState = 6,
+    BarInformation = 7,
+    PerLaneErrorCounts = 8,
+    AerStatus = 9,
+    OutboundTlpCounters = 10,
 };
 
 enum class DeviceIdentification : uint8_t
 {
     DEVICE_GPU = 0,
+    DEVICE_PCIE = 2,
     DEVICE_SMA = 5
 };
 
@@ -92,6 +127,26 @@ enum class InventoryPropertyId : uint8_t
     NVLINK_PEER_TYPE = 36
 };
 
+enum class PciePortType : uint8_t
+{
+    UPSTREAM = 0,
+    DOWNSTREAM = 1,
+};
+
+enum class DriverState : uint8_t
+{
+    DRIVER_STATE_UNKNOWN = 0,
+    DRIVER_STATE_NOT_LOADED = 1,
+    DRIVER_STATE_LOADED = 2,
+};
+
+enum class NetworkPortLinkType : uint8_t
+{
+    ETHERNET = 0,
+    INFINIBAND = 1,
+    UNKNOWN = 0xFF,
+};
+
 struct QueryDeviceIdentificationRequest
 {
     ocp::accelerator_management::CommonRequest hdr;
@@ -125,6 +180,29 @@ using GetCurrentEnergyCounterRequest = GetNumericSensorReadingRequest;
 
 using GetVoltageRequest = GetNumericSensorReadingRequest;
 
+constexpr size_t queryScalarGroupTelemetryV1RequestSize =
+    ocp::accelerator_management::commonRequestSize + 2;
+
+struct QueryScalarGroupTelemetryV2Request
+{
+    ocp::accelerator_management::CommonRequest hdr;
+    uint8_t upstreamPortNumber;
+    uint8_t portNumber;
+    uint8_t groupId;
+} __attribute__((packed));
+
+struct GetPortNetworkAddressesRequest
+{
+    ocp::accelerator_management::CommonRequest hdr;
+    uint16_t portNumber;
+} __attribute__((packed));
+
+struct GetEthernetPortTelemetryCountersRequest
+{
+    ocp::accelerator_management::CommonRequest hdr;
+    uint16_t portNumber;
+} __attribute__((packed));
+
 struct GetTemperatureReadingResponse
 {
     ocp::accelerator_management::CommonResponse hdr;
@@ -153,6 +231,28 @@ struct GetVoltageResponse
 {
     ocp::accelerator_management::CommonResponse hdr;
     uint32_t voltage;
+} __attribute__((packed));
+
+constexpr size_t getPowerLimitsRequestSize =
+    ocp::accelerator_management::commonRequestSize + sizeof(uint32_t);
+
+struct ListPCIePortsResponse
+{
+    ocp::accelerator_management::CommonResponse hdr;
+    uint16_t numUpstreamPorts;
+} __attribute__((packed));
+
+struct ListPCIePortsDownstreamPortsData
+{
+    uint8_t isInternal;
+    uint8_t count;
+} __attribute__((packed));
+
+struct GetDriverInformationResponse
+{
+    ocp::accelerator_management::CommonResponse hdr;
+    DriverState driverState;
+    char driverVersion;
 } __attribute__((packed));
 
 struct GetInventoryInformationRequest
@@ -217,6 +317,23 @@ int decodeGetVoltageResponse(std::span<const uint8_t> buf,
                              ocp::accelerator_management::CompletionCode& cc,
                              uint16_t& reasonCode, uint32_t& voltage);
 
+int encodeGetDriverInformationRequest(uint8_t instanceId,
+                                      std::span<uint8_t> buf);
+
+int decodeGetDriverInformationResponse(
+    std::span<const uint8_t> buf,
+    ocp::accelerator_management::CompletionCode& cc, uint16_t& reasonCode,
+    DriverState& driverState, std::string& driverVersion);
+
+int encodeGetPowerLimitsRequest(uint8_t instanceId, uint32_t powerLimitId,
+                                std::span<uint8_t> buf);
+
+int decodeGetPowerLimitsResponse(
+    std::span<const uint8_t> buf,
+    ocp::accelerator_management::CompletionCode& cc, uint16_t& reasonCode,
+    uint32_t& persistentPowerLimitRequested,
+    uint32_t& oneshotPowerLimitRequested, uint32_t& powerLimitEnforced);
+
 int encodeGetInventoryInformationRequest(uint8_t instanceId, uint8_t propertyId,
                                          std::span<uint8_t> buf);
 
@@ -225,4 +342,45 @@ int decodeGetInventoryInformationResponse(
     ocp::accelerator_management::CompletionCode& cc, uint16_t& reasonCode,
     InventoryPropertyId propertyId, InventoryValue& value);
 
+int encodeQueryScalarGroupTelemetryV1Request(
+    uint8_t instanceId, uint8_t deviceIndex, PcieScalarGroupId groupId,
+    std::span<uint8_t> buf);
+
+int encodeQueryScalarGroupTelemetryV2Request(
+    uint8_t instanceId, PciePortType portType, uint8_t upstreamPortNumber,
+    uint8_t portNumber, PcieScalarGroupId groupId, std::span<uint8_t> buf);
+
+int decodeQueryScalarGroupTelemetryV1Response(
+    std::span<const uint8_t> buf,
+    ocp::accelerator_management::CompletionCode& cc, uint16_t& reasonCode,
+    size_t& numTelemetryValues, std::vector<uint32_t>& telemetryValues);
+
+int decodeQueryScalarGroupTelemetryV2Response(
+    std::span<const uint8_t> buf,
+    ocp::accelerator_management::CompletionCode& cc, uint16_t& reasonCode,
+    size_t& numTelemetryValues, std::vector<uint32_t>& telemetryValues);
+
+int encodeListPciePortsRequest(uint8_t instanceId, std::span<uint8_t> buf);
+
+int decodeListPciePortsResponse(
+    std::span<const uint8_t> buf,
+    ocp::accelerator_management::CompletionCode& cc, uint16_t& reasonCode,
+    uint16_t& numUpstreamPorts, std::vector<uint8_t>& numDownstreamPorts);
+
+int encodeGetPortNetworkAddressesRequest(
+    uint8_t instanceId, uint16_t portNumber, std::span<uint8_t> buf);
+
+int decodeGetPortNetworkAddressesResponse(
+    std::span<const uint8_t> buf,
+    ocp::accelerator_management::CompletionCode& cc, uint16_t& reasonCode,
+    NetworkPortLinkType& linkType,
+    std::vector<std::pair<uint8_t, uint64_t>>& addresses);
+
+int encodeGetEthernetPortTelemetryCountersRequest(
+    uint8_t instanceId, uint16_t portNumber, std::span<uint8_t> buf);
+
+int decodeGetEthernetPortTelemetryCountersResponse(
+    std::span<const uint8_t> buf,
+    ocp::accelerator_management::CompletionCode& cc, uint16_t& reasonCode,
+    std::vector<std::pair<uint8_t, uint64_t>>& telemetryValues);
 } // namespace gpu

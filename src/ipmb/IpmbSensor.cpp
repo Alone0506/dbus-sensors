@@ -682,18 +682,12 @@ void interfaceRemoved(
     boost::container::flat_map<std::string, std::shared_ptr<IpmbSensor>>&
         sensors)
 {
-    if (message.is_method_error())
-    {
-        lg2::error("interfacesRemoved callback method error");
-        return;
-    }
-
     sdbusplus::message::object_path removedPath;
     std::vector<std::string> interfaces;
 
     message.read(removedPath, interfaces);
 
-    // If the xyz.openbmc_project.Confguration.X interface was removed
+    // If the xyz.openbmc_project.Configuration.X interface was removed
     // for one or more sensors, delete those sensor objects.
     auto sensorIt = sensors.begin();
     while (sensorIt != sensors.end())

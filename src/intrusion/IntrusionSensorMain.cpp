@@ -40,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 #include <variant>
@@ -47,7 +48,7 @@
 
 static constexpr const char* sensorType = "ChassisIntrusionSensor";
 static constexpr const char* nicType = "NIC";
-static constexpr auto nicTypes{std::to_array<const char*>({nicType})};
+static constexpr auto nicTypes{std::to_array<std::string_view>({nicType})};
 
 static const std::map<std::string, std::string> compatibleHwmonNames = {
     {"Aspeed2600_Hwmon", "intrusion0_alarm"}
@@ -274,9 +275,7 @@ static void getNicNameInfo(
                 lg2::error("can't find matched NIC name.");
             }
         });
-
-    getter->getConfiguration(
-        std::vector<std::string>{nicTypes.begin(), nicTypes.end()});
+    getter->getConfiguration(nicTypes);
 }
 
 static void processLanStatusChange(sdbusplus::message_t& message)
@@ -476,12 +475,7 @@ int main()
     // callback to handle configuration change
     boost::asio::steady_timer filterTimer(io);
     std::function<void(sdbusplus::message_t&)> eventHandler =
-        [&](sdbusplus::message_t& message) {
-            if (message.is_method_error())
-            {
-                lg2::error("callback method error");
-                return;
-            }
+        [&](sdbusplus::message_t&) {
             // this implicitly cancels the timer
             filterTimer.expires_after(std::chrono::seconds(1));
             filterTimer.async_wait([&](const boost::system::error_code& ec) {
@@ -496,9 +490,10 @@ int main()
             });
         };
 
+    static constexpr std::array<std::string_view, 1> sensorTypes{{sensorType}};
+
     std::vector<std::unique_ptr<sdbusplus::bus::match_t>> matches =
-        setupPropertiesChangedMatches(
-            *systemBus, std::to_array<const char*>({sensorType}), eventHandler);
+        setupPropertiesChangedMatches(*systemBus, sensorTypes, eventHandler);
 
     if (initializeLanStatus(systemBus))
     {
@@ -516,14 +511,7 @@ int main()
             "type='signal', member='PropertiesChanged',path_namespace='" +
                 std::string(inventoryPath) + "',arg0namespace='" +
                 configInterfaceName(nicType) + "'",
-            [&systemBus](sdbusplus::message_t& msg) {
-                if (msg.is_method_error())
-                {
-                    lg2::error("callback method error");
-                    return;
-                }
-                getNicNameInfo(systemBus);
-            });
+            [&systemBus](sdbusplus::message_t&) { getNicNameInfo(systemBus); });
     }
 
     io.run();

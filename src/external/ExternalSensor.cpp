@@ -17,11 +17,12 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 ExternalSensor::ExternalSensor(
-    const std::string& objectType, sdbusplus::asio::object_server& objectServer,
+    std::string_view objectType, sdbusplus::asio::object_server& objectServer,
     std::shared_ptr<sdbusplus::asio::connection>& conn,
     const std::string& sensorName, const std::string& sensorUnits,
     std::vector<thresholds::Threshold>&& thresholdsIn,
@@ -60,7 +61,13 @@ ExternalSensor::ExternalSensor(
 
     association =
         objectServer.add_interface(objectPath, association::interface);
-    setInitialProperties(sensorUnits);
+    std::string fullUnits = sensor_paths::convertToFullUnits(sensorUnits);
+    if (fullUnits.empty())
+    {
+        lg2::error("Invalid units for sensor: {UNITS}", "UNITS", sensorUnits);
+        throw std::invalid_argument("Invalid units for sensor");
+    }
+    setInitialProperties(fullUnits);
 
     lg2::debug(
         "ExternalSensor '{NAME}' constructed: path '{PATH}', type '{TYPE}', "

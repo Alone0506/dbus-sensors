@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <span>
@@ -23,7 +24,8 @@
 #include <variant>
 #include <vector>
 
-constexpr const char* inventoryPrefix = "/xyz/openbmc_project/inventory/";
+constexpr uint32_t milliwattsPerWatt = 1000;
+
 constexpr const char* acceleratorIfaceName =
     "xyz.openbmc_project.Inventory.Item.Accelerator";
 static constexpr const char* assetIfaceName =
@@ -37,7 +39,8 @@ Inventory::Inventory(
     sdbusplus::asio::object_server& objectServer,
     const std::string& inventoryName, mctp::MctpRequester& mctpRequester,
     const gpu::DeviceIdentification deviceTypeIn, const uint8_t eid,
-    boost::asio::io_context& io) :
+    boost::asio::io_context& io,
+    const std::shared_ptr<sdbusplus::asio::dbus_interface>& powerCapInterface) :
     name(escapeName(inventoryName)), mctpRequester(mctpRequester),
     deviceType(deviceTypeIn), eid(eid), retryTimer(io)
 {
@@ -67,10 +70,32 @@ Inventory::Inventory(
     // Static properties
     if (deviceType == gpu::DeviceIdentification::DEVICE_GPU)
     {
+        constexpr const char* acceleratorTypeGpu =
+            "xyz.openbmc_project.Inventory.Item.Accelerator.AcceleratorType.GPU";
         acceleratorInterface =
             objectServer.add_interface(path, acceleratorIfaceName);
-        acceleratorInterface->register_property("Type", std::string("GPU"));
+        acceleratorInterface->register_property("Type", acceleratorTypeGpu);
+
+        // Register BoostClockFrequency property
+        acceleratorInterface->register_property(
+            "BoostClockFrequency", std::numeric_limits<uint64_t>::max());
+
         acceleratorInterface->initialize();
+
+        // Add to query queue (manually since registerProperty is for strings
+        // only)
+        properties[gpu::InventoryPropertyId::DEFAULT_BOOST_CLOCKS] = {
+            acceleratorInterface, "BoostClockFrequency", 0, true};
+    }
+
+    if (powerCapInterface)
+    {
+        properties[gpu::InventoryPropertyId::MIN_DEVICE_POWER_LIMIT] = {
+            powerCapInterface, "MinPowerCapValue", 0, true};
+        properties[gpu::InventoryPropertyId::MAX_DEVICE_POWER_LIMIT] = {
+            powerCapInterface, "MaxPowerCapValue", 0, true};
+        properties[gpu::InventoryPropertyId::RATED_DEVICE_POWER_LIMIT] = {
+            powerCapInterface, "DefaultPowerCap", 0, true};
     }
 }
 
@@ -246,6 +271,51 @@ void Inventory::handleInventoryPropertyResponse(
                             "PROP_ID", static_cast<uint8_t>(propertyId), "NAME",
                             name);
                         break;
+                    }
+                    break;
+
+                case gpu::InventoryPropertyId::DEFAULT_BOOST_CLOCKS:
+                    if (std::holds_alternative<uint32_t>(info))
+                    {
+                        const uint32_t clockSpeed = std::get<uint32_t>(info);
+                        // Convert to uint64_t for D-Bus interface requirement
+                        const uint64_t clockSpeed64 =
+                            static_cast<uint64_t>(clockSpeed);
+                        it->second.interface->set_property(
+                            it->second.propertyName, clockSpeed64);
+                        success = true;
+                    }
+                    else
+                    {
+                        lg2::error(
+                            "Property ID {PROP_ID} for {NAME} expected uint32_t but got different type",
+                            "PROP_ID", static_cast<uint8_t>(propertyId), "NAME",
+                            name);
+                    }
+                    break;
+
+                case gpu::InventoryPropertyId::MIN_DEVICE_POWER_LIMIT:
+                case gpu::InventoryPropertyId::MAX_DEVICE_POWER_LIMIT:
+                case gpu::InventoryPropertyId::RATED_DEVICE_POWER_LIMIT:
+                    if (std::holds_alternative<uint32_t>(info))
+                    {
+                        // Device reports milliwatts; expose watts on D-Bus
+                        uint32_t powerLimit =
+                            std::get<uint32_t>(info) / milliwattsPerWatt;
+                        it->second.interface->set_property(
+                            it->second.propertyName, powerLimit);
+                        lg2::info(
+                            "Successfully received property ID {PROP_ID} for {NAME} with value: {VALUE}",
+                            "PROP_ID", static_cast<uint8_t>(propertyId), "NAME",
+                            name, "VALUE", powerLimit);
+                        success = true;
+                    }
+                    else
+                    {
+                        lg2::error(
+                            "Property ID {PROP_ID} for {NAME} expected uint32_t but got different type",
+                            "PROP_ID", static_cast<uint8_t>(propertyId), "NAME",
+                            name);
                     }
                     break;
 

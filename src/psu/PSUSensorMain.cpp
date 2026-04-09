@@ -49,10 +49,12 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <ranges>
 #include <regex>
 #include <stdexcept>
 #include <string>
@@ -61,14 +63,16 @@
 #include <variant>
 #include <vector>
 
-static std::regex i2cDevRegex(R"((\/i2c\-\d+\/\d+-[a-fA-F0-9]{4,4})(\/|$))");
+static std::regex devRegex(R"((\/i[23]c\-\d+\/\d+-[a-fA-F0-9]{4,4})(\/|$))");
 
-static const I2CDeviceTypeMap sensorTypes{
+static constexpr auto sensorTypes = std::to_array<
+    std::pair<std::string_view, I2CDeviceType>>({
     {"ADC128D818", I2CDeviceType{"adc128d818", true}},
     {"ADM1266", I2CDeviceType{"adm1266", true}},
     {"ADM1272", I2CDeviceType{"adm1272", true}},
     {"ADM1275", I2CDeviceType{"adm1275", true}},
     {"ADM1278", I2CDeviceType{"adm1278", true}},
+    {"ADM1281", I2CDeviceType{"adm1281", true}},
     {"ADM1293", I2CDeviceType{"adm1293", true}},
     {"ADS1015", I2CDeviceType{"ads1015", true}},
     {"ADS7830", I2CDeviceType{"ads7830", true}},
@@ -115,11 +119,17 @@ static const I2CDeviceTypeMap sensorTypes{
     {"MP2856", I2CDeviceType{"mp2856", true}},
     {"MP2857", I2CDeviceType{"mp2857", true}},
     {"MP2869", I2CDeviceType{"mp2869", true}},
+    {"MP2925", I2CDeviceType{"mp2925", true}},
+    {"MP2929", I2CDeviceType{"mp2929", true}},
     {"MP2971", I2CDeviceType{"mp2971", true}},
     {"MP2973", I2CDeviceType{"mp2973", true}},
     {"MP2975", I2CDeviceType{"mp2975", true}},
+    {"MP2993", I2CDeviceType{"mp2993", true}},
     {"MP5023", I2CDeviceType{"mp5023", true}},
+    {"MP5926", I2CDeviceType{"mp5926", true}},
     {"MP5990", I2CDeviceType{"mp5990", true}},
+    {"MP5998", I2CDeviceType{"mp5998", true}},
+    {"MP9945", I2CDeviceType{"mp9945", true}},
     {"MP29612", I2CDeviceType{"mp29612", true}},
     {"MPQ8785", I2CDeviceType{"mpq8785", true}},
     {"NCP4200", I2CDeviceType{"ncp4200", true}},
@@ -129,6 +139,7 @@ static const I2CDeviceTypeMap sensorTypes{
     {"SQ52206", I2CDeviceType{"sq52206", true}},
     {"RAA228000", I2CDeviceType{"raa228000", true}},
     {"RAA228004", I2CDeviceType{"raa228004", true}},
+    {"RAA228006", I2CDeviceType{"raa228006", true}},
     {"RAA228228", I2CDeviceType{"raa228228", true}},
     {"RAA228620", I2CDeviceType{"raa228620", true}},
     {"RAA229001", I2CDeviceType{"raa229001", true}},
@@ -146,7 +157,7 @@ static const I2CDeviceTypeMap sensorTypes{
     {"XDPE11280", I2CDeviceType{"xdpe11280", true}},
     {"XDPE12284", I2CDeviceType{"xdpe12284", true}},
     {"XDPE152C4", I2CDeviceType{"xdpe152c4", true}},
-};
+});
 
 enum class DevTypes
 {
@@ -158,8 +169,8 @@ enum class DevTypes
 struct DevParams
 {
     unsigned int matchIndex = 0;
-    std::string matchRegEx;
-    std::string nameRegEx;
+    std::string_view matchRegEx;
+    std::string_view nameRegEx;
 };
 
 static boost::container::flat_map<std::string, std::shared_ptr<PSUSensor>>
@@ -168,13 +179,58 @@ static boost::container::flat_map<std::string, std::unique_ptr<PSUCombineEvent>>
     combineEvents;
 static boost::container::flat_map<std::string, std::unique_ptr<PwmSensor>>
     pwmSensors;
-static boost::container::flat_map<std::string, std::string> sensorTable;
-static boost::container::flat_map<std::string, PSUProperty> labelMatch;
-static EventPathList eventMatch;
-static EventPathList limitEventMatch;
+
+struct SensorUnit
+{
+    std::string_view name;
+    std::string_view units;
+    auto operator<=>(const SensorUnit&) const = default;
+};
+
+static constexpr const std::array<SensorUnit, 6> sensorTable{{
+    {"curr", sensor_paths::unitAmperes},
+    {"fan", sensor_paths::unitRPMs},
+    {"in", sensor_paths::unitVolts},
+    {"power", sensor_paths::unitWatts},
+    {"temp", sensor_paths::unitDegreesC},
+    {"voltage", sensor_paths::unitVolts},
+}};
+
+static constexpr std::array<PSUProperty, 20> labelMatch{{
+    {"curr", "Output Current", 255, 0, 3, 0},
+    {"fan", "Fan Speed ", 30000, 0, 0, 0},
+    {"iin", "Input Current", 20, 0, 3, 0},
+    {"in_voltage", "Output Voltage", 255, 0, 3, 0},
+    {"in", "Output Voltage", 255, 0, 3, 0},
+    {"iout", "Output Current", 255, 0, 3, 0},
+    {"maxiout", "Max Output Current", 255, 0, 3, 0},
+    {"maxpin", "Max Input Power", 3000, 0, 6, 0},
+    {"maxtemp", "Max Temperature", 127, -128, 3, 0},
+    {"maxvin", "Max Input Voltage", 300, 0, 3, 0},
+    {"pin", "Input Power", 3000, 0, 6, 0},
+    {"pout", "Output Power", 3000, 0, 6, 0},
+    {"power", "Output Power", 3000, 0, 6, 0},
+    {"temp", "Temperature", 127, -128, 3, 0},
+    {"vin", "Input Voltage", 300, 0, 3, 0},
+    {"vmon", "Auxiliary Input Voltage", 255, 0, 3, 0},
+    {"voltage", "Output Voltage", 255, 0, 3, 0},
+    {"vout", "Output Voltage", 255, 0, 3, 0},
+}};
+
+const static EventPathList eventMatch{{"PredictiveFailure", {"power1_alarm"}},
+                                      {"Failure", {"in2_alarm"}},
+                                      {"ACLost", {"in1_beep"}},
+                                      {"ConfigureError", {"in1_fault"}}};
+const static EventPathList limitEventMatch{
+    {"PredictiveFailure", {"max_alarm", "min_alarm"}},
+    {"Failure", {"crit_alarm", "lcrit_alarm"}}};
 
 static boost::container::flat_map<size_t, bool> cpuPresence;
-static boost::container::flat_map<DevTypes, DevParams> devParamMap;
+constexpr static auto devParamMap =
+    std::to_array<std::pair<DevTypes, DevParams>>(
+        {{DevTypes::HWMON, {1, R"(\w\d+_input$)", "([A-Za-z]+)[0-9]*_"}},
+         {DevTypes::IIO,
+          {2, R"(\w+_(raw|input)$)", "^(in|out)_([A-Za-z]+)[0-9]*_"}}});
 
 // Function CheckEvent will check each attribute from eventMatch table in the
 // sysfs. If the attributes exists in sysfs, then store the complete path
@@ -344,7 +400,10 @@ static void createSensorsCallback(
         std::getline(nameFile, pmbusName);
         nameFile.close();
 
-        if (!sensorTypes.contains(pmbusName))
+        if (std::ranges::find_if(sensorTypes.begin(), sensorTypes.end(),
+                                 [pmbusName](const auto& a) {
+                                     return a.second.name == pmbusName;
+                                 }) == sensorTypes.end())
         {
             // To avoid this error message, add your driver name to
             // the pmbusNames vector at the top of this file.
@@ -370,7 +429,7 @@ static void createSensorsCallback(
                 std::filesystem::canonical(directory / "device");
             std::smatch match;
             // Find /i2c-<bus>/<bus>-<address> match in device path
-            std::regex_search(devicePath, match, i2cDevRegex);
+            std::regex_search(devicePath, match, devRegex);
             if (match.empty())
             {
                 lg2::error("Found bad device path: '{PATH}'", "PATH",
@@ -539,8 +598,17 @@ static void createSensorsCallback(
         } while (findPSUName != baseConfig->end());
 
         std::vector<std::filesystem::path> sensorPaths;
-        if (!findFiles(directory, devParamMap[devType].matchRegEx, sensorPaths,
-                       0))
+        const auto* param = std::find_if(
+            devParamMap.begin(), devParamMap.end(),
+            [devType](const auto& p) { return p.first == devType; });
+        if (param == devParamMap.end())
+        {
+            lg2::error("No dev param map found for dev type: {TYPE}", "TYPE",
+                       devType);
+            continue;
+        }
+
+        if (!findFiles(directory, param->second.matchRegEx, sensorPaths, 0))
         {
             lg2::error("No PSU non-label sensor in PSU");
             continue;
@@ -562,8 +630,17 @@ static void createSensorsCallback(
             findLabels =
                 std::get<std::vector<std::string>>(findLabelObj->second);
         }
+        const auto* devParam = std::find_if(
+            devParamMap.begin(), devParamMap.end(),
+            [devType](const auto& p) { return p.first == devType; });
+        if (devParam == devParamMap.end())
+        {
+            lg2::error("No dev param map found for dev type: {TYPE}", "TYPE",
+                       devType);
+            continue;
+        }
 
-        std::regex sensorNameRegEx(devParamMap[devType].nameRegEx);
+        std::regex sensorNameRegEx(std::string(devParam->second.nameRegEx));
         std::smatch matches;
 
         for (const auto& sensorPath : sensorPaths)
@@ -579,7 +656,18 @@ static void createSensorsCallback(
                 // in, curr, power, temp, ...
                 // iio in_*_raw filename without number:
                 // voltage, temp, pressure, ...
-                sensorNameSubStr = matches[devParamMap[devType].matchIndex];
+
+                const auto* param = std::find_if(
+                    devParamMap.begin(), devParamMap.end(),
+                    [devType](const auto& p) { return p.first == devType; });
+                if (param == devParamMap.end())
+                {
+                    lg2::error("No dev param map found for dev type: {TYPE}",
+                               "TYPE", devType);
+                    continue;
+                }
+
+                sensorNameSubStr = matches[param->second.matchIndex];
             }
             else
             {
@@ -687,8 +775,10 @@ static void createSensorsCallback(
                                    static_cast<int (*)(int)>(std::isdigit));
             std::string_view labelHeadView(
                 labelHead.data(), std::distance(labelHead.begin(), it));
-            auto findProperty =
-                labelMatch.find(static_cast<std::string>(labelHeadView));
+            const auto* findProperty = std::ranges::find_if(
+                labelMatch, [&labelHeadView](const auto& a) {
+                    return a.hwmonLabelName == labelHeadView;
+                });
             if (findProperty == labelMatch.end())
             {
                 lg2::debug(
@@ -701,7 +791,12 @@ static void createSensorsCallback(
             // by making a copy and modifying that instead.
             // Avoid bleedthrough of one device's customizations to
             // the next device, as each should be independently customizable.
-            PSUProperty psuProperty = findProperty->second;
+            const PSUProperty& psuProperty = *findProperty;
+            std::string labelTypeName(psuProperty.labelTypeName);
+            double sensorScaleFactor = psuProperty.sensorScaleFactor;
+            double maxReading = psuProperty.maxReading;
+            double minReading = psuProperty.minReading;
+            double sensorOffset = psuProperty.sensorOffset;
 
             // Use label head as prefix for reading from config file,
             // example if temp1: temp1_Name, temp1_Scale, temp1_Min, ...
@@ -714,12 +809,13 @@ static void createSensorsCallback(
 
             bool customizedName = false;
             auto findCustomName = baseConfig->find(keyName);
+
             if (findCustomName != baseConfig->end())
             {
                 try
                 {
-                    psuProperty.labelTypeName = std::visit(
-                        VariantToStringVisitor(), findCustomName->second);
+                    labelTypeName = std::visit(VariantToStringVisitor(),
+                                               findCustomName->second);
                 }
                 catch (const std::invalid_argument&)
                 {
@@ -737,7 +833,7 @@ static void createSensorsCallback(
             {
                 try
                 {
-                    psuProperty.sensorScaleFactor = std::visit(
+                    sensorScaleFactor = std::visit(
                         VariantToUnsignedIntVisitor(), findCustomScale->second);
                 }
                 catch (const std::invalid_argument&)
@@ -747,7 +843,7 @@ static void createSensorsCallback(
                 }
 
                 // Avoid later division by zero
-                if (psuProperty.sensorScaleFactor > 0)
+                if (sensorScaleFactor > 0)
                 {
                     customizedScale = true;
                 }
@@ -763,8 +859,8 @@ static void createSensorsCallback(
             {
                 try
                 {
-                    psuProperty.minReading = std::visit(
-                        VariantToDoubleVisitor(), findCustomMin->second);
+                    minReading = std::visit(VariantToDoubleVisitor(),
+                                            findCustomMin->second);
                 }
                 catch (const std::invalid_argument&)
                 {
@@ -778,8 +874,8 @@ static void createSensorsCallback(
             {
                 try
                 {
-                    psuProperty.maxReading = std::visit(
-                        VariantToDoubleVisitor(), findCustomMax->second);
+                    maxReading = std::visit(VariantToDoubleVisitor(),
+                                            findCustomMax->second);
                 }
                 catch (const std::invalid_argument&)
                 {
@@ -793,8 +889,8 @@ static void createSensorsCallback(
             {
                 try
                 {
-                    psuProperty.sensorOffset = std::visit(
-                        VariantToDoubleVisitor(), findCustomOffset->second);
+                    sensorOffset = std::visit(VariantToDoubleVisitor(),
+                                              findCustomOffset->second);
                 }
                 catch (const std::invalid_argument&)
                 {
@@ -812,7 +908,7 @@ static void createSensorsCallback(
                                                     findPowerState->second);
                 setReadState(powerState, readState);
             }
-            if (!(psuProperty.minReading < psuProperty.maxReading))
+            if (!(minReading < maxReading))
             {
                 lg2::error("Min must be less than Max");
                 continue;
@@ -869,7 +965,7 @@ static void createSensorsCallback(
             // Similarly, if sensor scaling factor is being customized,
             // then the below power-of-10 constraint becomes unnecessary,
             // as config should be able to specify an arbitrary divisor.
-            unsigned int factor = psuProperty.sensorScaleFactor;
+            unsigned int factor = sensorScaleFactor;
             if (!customizedScale)
             {
                 // Preserve existing usage of hardcoded labelMatch table below
@@ -903,7 +999,10 @@ static void createSensorsCallback(
                            sensorNameSubStr);
             }
 
-            auto findSensorUnit = sensorTable.find(sensorNameSubStr);
+            const auto* findSensorUnit = std::ranges::find_if(
+                sensorTable, [&sensorNameSubStr](const SensorUnit& a) {
+                    return a.name == sensorNameSubStr;
+                });
             if (findSensorUnit == sensorTable.end())
             {
                 lg2::error("'{NAME}' is not a recognized sensor type", "NAME",
@@ -918,7 +1017,7 @@ static void createSensorsCallback(
                        psuProperty.minReading, "MAX", psuProperty.maxReading,
                        "OFFSET", psuProperty.sensorOffset);
 
-            std::string sensorName = psuProperty.labelTypeName;
+            std::string sensorName(labelTypeName);
             if (customizedName)
             {
                 if (sensorName.empty())
@@ -933,7 +1032,8 @@ static void createSensorsCallback(
             {
                 // Sensor name not customized, do prefix/suffix composition,
                 // preserving default behavior by using psuNameFromIndex.
-                sensorName = psuNameFromIndex + " " + psuProperty.labelTypeName;
+                sensorName =
+                    std::format("{} {}", psuNameFromIndex, labelTypeName);
 
                 // The labelTypeName of a fan can be:
                 // "Fan Speed 1", "Fan Speed 2", "Fan Speed 3" ...
@@ -963,9 +1063,8 @@ static void createSensorsCallback(
                 sensors[sensorName] = std::make_shared<PSUSensor>(
                     sensorPathStr, sensorType, objectServer, dbusConnection, io,
                     sensorName, std::move(sensorThresholds), *interfacePath,
-                    readState, findSensorUnit->second, factor,
-                    psuProperty.maxReading, psuProperty.minReading,
-                    psuProperty.sensorOffset, labelHead, thresholdConfSize,
+                    readState, findSensorUnit->units, factor, maxReading,
+                    minReading, sensorOffset, labelHead, thresholdConfSize,
                     pollRate, i2cDev);
                 sensors[sensorName]->setupRead();
                 ++numCreated;
@@ -1069,56 +1168,13 @@ void createSensors(
             createSensorsCallback(io, objectServer, dbusConnection,
                                   sensorConfigs, sensorsChanged, activateOnly);
         });
-    std::vector<std::string> types;
+    std::vector<std::string_view> types;
     types.reserve(sensorTypes.size());
     for (const auto& [type, dt] : sensorTypes)
     {
-        types.push_back(type);
+        types.emplace_back(type);
     }
     getter->getConfiguration(types);
-}
-
-void propertyInitialize()
-{
-    sensorTable = {{"power", sensor_paths::unitWatts},
-                   {"curr", sensor_paths::unitAmperes},
-                   {"temp", sensor_paths::unitDegreesC},
-                   {"in", sensor_paths::unitVolts},
-                   {"voltage", sensor_paths::unitVolts},
-                   {"fan", sensor_paths::unitRPMs}};
-
-    labelMatch = {
-        {"pin", PSUProperty("Input Power", 3000, 0, 6, 0)},
-        {"pout", PSUProperty("Output Power", 3000, 0, 6, 0)},
-        {"power", PSUProperty("Output Power", 3000, 0, 6, 0)},
-        {"maxpin", PSUProperty("Max Input Power", 3000, 0, 6, 0)},
-        {"vin", PSUProperty("Input Voltage", 300, 0, 3, 0)},
-        {"maxvin", PSUProperty("Max Input Voltage", 300, 0, 3, 0)},
-        {"in_voltage", PSUProperty("Output Voltage", 255, 0, 3, 0)},
-        {"voltage", PSUProperty("Output Voltage", 255, 0, 3, 0)},
-        {"vout", PSUProperty("Output Voltage", 255, 0, 3, 0)},
-        {"vmon", PSUProperty("Auxiliary Input Voltage", 255, 0, 3, 0)},
-        {"in", PSUProperty("Output Voltage", 255, 0, 3, 0)},
-        {"iin", PSUProperty("Input Current", 20, 0, 3, 0)},
-        {"iout", PSUProperty("Output Current", 255, 0, 3, 0)},
-        {"curr", PSUProperty("Output Current", 255, 0, 3, 0)},
-        {"maxiout", PSUProperty("Max Output Current", 255, 0, 3, 0)},
-        {"temp", PSUProperty("Temperature", 127, -128, 3, 0)},
-        {"maxtemp", PSUProperty("Max Temperature", 127, -128, 3, 0)},
-        {"fan", PSUProperty("Fan Speed ", 30000, 0, 0, 0)}};
-
-    limitEventMatch = {{"PredictiveFailure", {"max_alarm", "min_alarm"}},
-                       {"Failure", {"crit_alarm", "lcrit_alarm"}}};
-
-    eventMatch = {{"PredictiveFailure", {"power1_alarm"}},
-                  {"Failure", {"in2_alarm"}},
-                  {"ACLost", {"in1_beep"}},
-                  {"ConfigureError", {"in1_fault"}}};
-
-    devParamMap = {
-        {DevTypes::HWMON, {1, R"(\w\d+_input$)", "([A-Za-z]+)[0-9]*_"}},
-        {DevTypes::IIO,
-         {2, R"(\w+_(raw|input)$)", "^(in|out)_([A-Za-z]+)[0-9]*_"}}};
 }
 
 static void powerStateChanged(
@@ -1156,8 +1212,6 @@ int main()
     auto sensorsChanged =
         std::make_shared<boost::container::flat_set<std::string>>();
 
-    propertyInitialize();
-
     auto powerCallBack = [&io, &objectServer,
                           &systemBus](PowerState type, bool state) {
         powerStateChanged(type, state, sensors, io, objectServer, systemBus);
@@ -1171,11 +1225,6 @@ int main()
     boost::asio::steady_timer filterTimer(io);
     std::function<void(sdbusplus::message_t&)> eventHandler =
         [&](sdbusplus::message_t& message) {
-            if (message.is_method_error())
-            {
-                lg2::error("callback method error");
-                return;
-            }
             sensorsChanged->insert(message.get_path());
             filterTimer.expires_after(std::chrono::seconds(3));
             filterTimer.async_wait([&](const boost::system::error_code& ec) {

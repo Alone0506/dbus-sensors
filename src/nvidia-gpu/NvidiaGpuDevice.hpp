@@ -8,12 +8,16 @@
 #include "Inventory.hpp"
 #include "MctpRequester.hpp"
 #include "NvidiaDeviceDiscovery.hpp"
+#include "NvidiaGpuControl.hpp"
 #include "NvidiaGpuPowerSensor.hpp"
 #include "NvidiaGpuSensor.hpp"
 
+#include <NvidiaDriverInformation.hpp>
 #include <NvidiaGpuEnergySensor.hpp>
 #include <NvidiaGpuPowerPeakReading.hpp>
 #include <NvidiaGpuVoltageSensor.hpp>
+#include <NvidiaPcieInterface.hpp>
+#include <NvidiaPciePort.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <sdbusplus/asio/connection.hpp>
@@ -34,6 +38,8 @@ class GpuDevice : public std::enable_shared_from_this<GpuDevice>
               uint8_t eid, boost::asio::io_context& io,
               mctp::MctpRequester& mctpRequester,
               sdbusplus::asio::object_server& objectServer);
+
+    ~GpuDevice();
 
     const std::string& getPath() const
     {
@@ -63,6 +69,8 @@ class GpuDevice : public std::enable_shared_from_this<GpuDevice>
 
     mctp::MctpRequester& mctpRequester;
 
+    boost::asio::io_context& io;
+
     std::shared_ptr<sdbusplus::asio::connection> conn;
 
     sdbusplus::asio::object_server& objectServer;
@@ -74,6 +82,12 @@ class GpuDevice : public std::enable_shared_from_this<GpuDevice>
     std::shared_ptr<NvidiaGpuPowerPeakReading> peakPower;
     std::shared_ptr<NvidiaGpuEnergySensor> energySensor;
     std::shared_ptr<NvidiaGpuVoltageSensor> voltageSensor;
+    std::shared_ptr<NvidiaDriverInformation> driverInfo;
+    std::shared_ptr<NvidiaGpuControl> gpuControl;
+    std::shared_ptr<sdbusplus::asio::dbus_interface> powerCapInterface;
+
+    std::shared_ptr<NvidiaPcieInterface> pcieInterface;
+    std::shared_ptr<NvidiaPciePortInfo> pciePort;
 
     std::array<uint8_t, sizeof(gpu::ReadThermalParametersRequest)>
         thermalParamReqMsg{};

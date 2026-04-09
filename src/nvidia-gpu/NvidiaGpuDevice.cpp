@@ -11,12 +11,16 @@
 #include <Inventory.hpp>
 #include <MctpRequester.hpp>
 #include <NvidiaDeviceDiscovery.hpp>
+#include <NvidiaDriverInformation.hpp>
+#include <NvidiaGpuControl.hpp>
 #include <NvidiaGpuEnergySensor.hpp>
 #include <NvidiaGpuMctpVdm.hpp>
 #include <NvidiaGpuPowerPeakReading.hpp>
 #include <NvidiaGpuPowerSensor.hpp>
 #include <NvidiaGpuSensor.hpp>
 #include <NvidiaGpuVoltageSensor.hpp>
+#include <NvidiaPcieInterface.hpp>
+#include <NvidiaPciePort.hpp>
 #include <OcpMctpVdm.hpp>
 #include <boost/asio/io_context.hpp>
 #include <phosphor-logging/lg2.hpp>
@@ -27,6 +31,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <span>
 #include <string>
@@ -43,6 +48,9 @@ static constexpr std::array<uint8_t, 3> thresholdIds{
     gpuTLimitWarningThresholdId, gpuTLimitCriticalThresholdId,
     gpuTLimitHardshutDownThresholdId};
 
+static constexpr const char* controlPowerPrefix =
+    "/xyz/openbmc_project/control/power/";
+
 GpuDevice::GpuDevice(const SensorConfigs& configs, const std::string& name,
                      const std::string& path,
                      const std::shared_ptr<sdbusplus::asio::connection>& conn,
@@ -51,35 +59,62 @@ GpuDevice::GpuDevice(const SensorConfigs& configs, const std::string& name,
                      sdbusplus::asio::object_server& objectServer) :
     eid(eid), sensorPollMs(std::chrono::milliseconds{configs.pollRate}),
     waitTimer(io, std::chrono::steady_clock::duration(0)),
-    mctpRequester(mctpRequester), conn(conn), objectServer(objectServer),
-    configs(configs), name(escapeName(name)), path(path)
+    mctpRequester(mctpRequester), io(io), conn(conn),
+    objectServer(objectServer), configs(configs), name(escapeName(name)),
+    path(path)
 {
-    inventory = std::make_shared<Inventory>(
-        conn, objectServer, name, mctpRequester,
-        gpu::DeviceIdentification::DEVICE_GPU, eid, io);
+    const std::string powerControlPath = controlPowerPrefix + this->name;
+
+    powerCapInterface = objectServer.add_interface(
+        powerControlPath, "xyz.openbmc_project.Control.Power.Cap");
+
+    powerCapInterface->register_property("PowerCap",
+                                         std::numeric_limits<uint32_t>::max());
+    powerCapInterface->register_property("PowerCapEnable", false);
+    powerCapInterface->register_property("MinPowerCapValue", uint32_t{0});
+    powerCapInterface->register_property("MaxPowerCapValue",
+                                         std::numeric_limits<uint32_t>::max());
+    powerCapInterface->register_property(
+        "DefaultPowerCap", std::numeric_limits<uint32_t>::max(),
+        sdbusplus::asio::PropertyPermission::readOnly);
+
+    powerCapInterface->initialize();
+}
+
+GpuDevice::~GpuDevice()
+{
+    objectServer.remove_interface(powerCapInterface);
 }
 
 void GpuDevice::init()
 {
-    makeSensors();
+    inventory = std::make_shared<Inventory>(
+        conn, objectServer, name, mctpRequester,
+        gpu::DeviceIdentification::DEVICE_GPU, eid, io, powerCapInterface);
+
     inventory->init();
+
+    makeSensors();
 }
 
 void GpuDevice::makeSensors()
 {
     tempSensor = std::make_shared<NvidiaGpuTempSensor>(
         conn, mctpRequester, name + "_TEMP_0", path, eid, gpuTempSensorId,
-        objectServer, std::vector<thresholds::Threshold>{});
+        objectServer, std::vector<thresholds::Threshold>{},
+        gpu::DeviceIdentification::DEVICE_GPU);
 
     dramTempSensor = std::make_shared<NvidiaGpuTempSensor>(
         conn, mctpRequester, name + "_DRAM_0_TEMP_0", path, eid,
         gpuDramTempSensorId, objectServer,
         std::vector<thresholds::Threshold>{thresholds::Threshold{
-            thresholds::Level::CRITICAL, thresholds::Direction::HIGH, 95.0}});
+            thresholds::Level::CRITICAL, thresholds::Direction::HIGH, 95.0}},
+        gpu::DeviceIdentification::DEVICE_GPU);
 
     powerSensor = std::make_shared<NvidiaGpuPowerSensor>(
         conn, mctpRequester, name + "_Power_0", path, eid, gpuPowerSensorId,
-        objectServer, std::vector<thresholds::Threshold>{});
+        objectServer, std::vector<thresholds::Threshold>{},
+        gpu::DeviceIdentification::DEVICE_GPU);
 
     peakPower = std::make_shared<NvidiaGpuPowerPeakReading>(
         mctpRequester, name + "_Power_0", eid, gpuPeakPowerSensorId,
@@ -87,11 +122,29 @@ void GpuDevice::makeSensors()
 
     energySensor = std::make_shared<NvidiaGpuEnergySensor>(
         conn, mctpRequester, name + "_Energy_0", path, eid, gpuEnergySensorId,
-        objectServer, std::vector<thresholds::Threshold>{});
+        objectServer, std::vector<thresholds::Threshold>{},
+        gpu::DeviceIdentification::DEVICE_GPU);
 
     voltageSensor = std::make_shared<NvidiaGpuVoltageSensor>(
         conn, mctpRequester, name + "_Voltage_0", path, eid, gpuVoltageSensorId,
-        objectServer, std::vector<thresholds::Threshold>{});
+        objectServer, std::vector<thresholds::Threshold>{},
+        gpu::DeviceIdentification::DEVICE_GPU);
+
+    driverInfo = std::make_shared<NvidiaDriverInformation>(
+        conn, mctpRequester, name, path, eid, objectServer);
+
+    gpuControl = std::make_shared<NvidiaGpuControl>(
+        objectServer, name, inventoryPrefix + name, mctpRequester, eid,
+        powerCapInterface);
+
+    pcieInterface = std::make_shared<NvidiaPcieInterface>(
+        conn, mctpRequester, name, path, eid, objectServer,
+        gpu::DeviceIdentification::DEVICE_GPU);
+
+    pciePort = std::make_shared<NvidiaPciePortInfo>(
+        conn, mctpRequester, "UP_0", name, path, eid,
+        gpu::PciePortType::UPSTREAM, 0, 0, objectServer,
+        gpu::DeviceIdentification::DEVICE_GPU);
 
     getTLimitThresholds();
 
@@ -195,7 +248,8 @@ void GpuDevice::processTLimitThresholds(const std::error_code& ec)
 
     tLimitSensor = std::make_shared<NvidiaGpuTempSensor>(
         conn, mctpRequester, name + "_TEMP_1", path, eid, gpuTLimitSensorId,
-        objectServer, std::move(tLimitThresholds));
+        objectServer, std::move(tLimitThresholds),
+        gpu::DeviceIdentification::DEVICE_GPU);
 }
 
 void GpuDevice::read()
@@ -210,6 +264,10 @@ void GpuDevice::read()
     peakPower->update();
     energySensor->update();
     voltageSensor->update();
+    driverInfo->update();
+    gpuControl->update();
+    pcieInterface->update();
+    pciePort->update();
 
     waitTimer.expires_after(std::chrono::milliseconds(sensorPollMs));
     waitTimer.async_wait(
